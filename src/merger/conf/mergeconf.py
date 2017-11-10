@@ -119,7 +119,6 @@ VERSION_PREFIX_FILTER           = get_config(CONFIGREADER, 'general', 'version-p
 VERSIONS_REPOSITORY             = get_config(CONFIGREADER, 'general', 'versions-repository')
 
 LOGGER                          = initlogger(APP_KEY, LOG_FILE_PATH, SVN_PASSWORD)
-M_SHU                           = ShellUtils(LOGGER)
 MERGE_SERVER_URL                = 'http://' + get_config(CONFIGREADER, 'general', 'host', default='localhost') + ':' + get_config(CONFIGREADER, 'general', 'port', default='8080') + '/?%s'
 
 FILES_TO_IGNORE_STR             = get_config(CONFIGREADER, 'general', 'files-to-ignore')
@@ -176,6 +175,7 @@ KEY_SVN_PASSWORD                = 'SVN_PASSWORD'
 KEY_IS_MANUAL                   = 'is_manual'
 KEY_CURRENT_BRANCH              = 'current_branch'
 KEY_LOOK_RESULT                 = 'look_result'
+KEY_DIFF_SUMM_RESULT            = 'diff_summ_result'
 KEY_NEXT_BRANCH                 = 'next_branch'
 KEY_NEXT_BRANCH_URL             = 'next_branch_url'
 KEY_CURRENT_BRANCH_URL          = 'current_branch_url'

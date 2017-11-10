@@ -31,11 +31,12 @@ General svn utilities, used heavily as auto merger works with svn.
 """
 
 from merger.conf import mergeconf
-from merger.conf.mergeconf import M_SHU, TMPL_COMMIT_LOG_MSG, TMPDIR, NA
-from merger.utils.shellutils import ShellUtils
+from merger.conf.mergeconf import TMPL_COMMIT_LOG_MSG, TMPDIR, NA
 import logging
 import os
 import re
+import pysvn
+import time
 
 
 COMMIT_TMPL                 = 'svn commit %s -F %s --username %s --password %s'
@@ -54,24 +55,6 @@ LOOK_LOG_TMPL               = 'svnlook log --revision %s %s'
 MESSAGE_ABORT_COMMIT        = 'Aborting commit'
 MESSAGE_SUCCESSFUL_COMMIT   = 'Committed revision'
 
-
-def get_commit_log_message(repo, rev):
-    """
-        Here we compute the commit log message after merge.
-        In this commit log message we will include details about
-        the merge that was performed, who was original committer etc.
-        Args:
-            repo: Repository on which the original commit was perforemd.
-            rev: The revision that was originally committed from it the 
-                merge was performed.
-        Returns:
-            The message which will be provided to the commit.
-    """
-    svnlook_log_cmd = LOOK_LOG_TMPL % (rev, repo)
-    mergeconf.LOGGER.debug('svn look log command: %s ' % svnlook_log_cmd)
-    message = M_SHU.runshellcmd(svnlook_log_cmd)
-    mergeconf.LOGGER.debug('log result: %s ' % message)
-    return message
 
 def get_files_by_log(log):
     """
@@ -117,6 +100,8 @@ class SVNCmdParams:
         self.isxml = self.__dict__["isxml"]
         self.stoponcopy = self.__dict__["stoponcopy"]
 
+
+
 class SVNUtils:
     """
     General svn utilities, used heavily as auto merger works with svn.
@@ -126,18 +111,31 @@ class SVNUtils:
         self.tmpdir = svn_cmd_params.tmpdir
         self.username = svn_cmd_params.username
         self.password = svn_cmd_params.password
-        self.shellutils = ShellUtils(svn_cmd_params.logger)
+        self.svnClient = pysvn.Client()
+        self.svnClient.callback_get_login = self.get_login
+        self.svnClient.callback_ssl_server_trust_prompt = self.ssl_server_trust_prompt
+        self.svnClient.callback_notify = self.merge_callback_fn
 
-    def log(self, url, startdate, enddate, isxml=False, stoponcopy=False):
-        """
-        Run svn log commmand.
-        """
-        logcommand = LOG_URL_TMP % (url, '{' + startdate + '}', '{' + enddate + '}', self.username, self.password, 
-                                    ' --xml' if isxml else '', ' --stop-on-copy' if stoponcopy else '')
-        logging.info(logcommand)
-        return M_SHU.runshellcmd(logcommand)
 
-    def get_log_message(self, url, rev):
+    def merge_callback_fn(self, event_dict):
+        self.logger.debug(event_dict.items())
+
+
+    def ssl_server_trust_prompt(trust_dict):
+        return True, trust_dict['failures'], False
+
+    def get_login(realm, username, may_save):
+        return True, self.username, self.password, True
+
+    
+    def get_diff_summary(self, url, start_rev, end_rev):
+        startRev = pysvn.Revision(pysvn.opt_revision_kind.number,  start_rev)
+        endRev = pysvn.Revision(pysvn.opt_revision_kind.number,  end_rev)
+        diffSumm = self.svnClient.diff_summarize(url, startRev, url, endRev)
+        # self.logger.debug("diff_summarize result: ", diffSumm[0].items())
+        return diffSumm
+
+    def get_log_entry(self, url, rev):
         """
         Get commit log message by url and revision
         Arguments:
@@ -147,8 +145,15 @@ class SVNUtils:
             The message which was committed on revision rev on url specified.
         """
         mergeconf.LOGGER.debug("Commit log message for url [%s] with rev [%s]" % (url, rev))
-        log_cmd = (LOG_URL_TMP % (url, rev, rev, self.username, self.password))
-        return M_SHU.runshellcmd(log_cmd)
+        # log_cmd = (LOG_URL_TMP % (url, rev, rev, self.username, self.password))
+        logRev = pysvn.Revision(pysvn.opt_revision_kind.number,  rev)
+        logMessages = self.svnClient.log(url, logRev, logRev)
+        return logMessages[0]
+
+
+    def status(self, workingCopy):
+        workingCopyStatus = self.svnClient.status(workingCopy)
+        return workingCopyStatus
 
         
     def commit(self, fileordir_to_commit, message, rev):
@@ -204,9 +209,9 @@ class SVNUtils:
             Returns:
                 Nothing, local working branch will be updated in order to perform the auto merge.
         """
-        M_SHU.runshellcmd(CLEANUP_TMPL % (TMPDIR, branch_dir, self.username, self.password))
-        M_SHU.runshellcmd(REVERT_TMPL % (TMPDIR, branch_dir, self.username, self.password))
-        M_SHU.runshellcmd(UPDATE_TMPL % (TMPDIR, branch_dir, self.username, self.password))
+        self.svnClient.cleanup(branch_dir)
+        self.svnClient.revert(branch_dir, True)
+        self.svnClient.update(branch_dir)
 
     def checkout(self, url, tolocation):
         """Given a branch url check it out to the local disk.
@@ -214,16 +219,14 @@ class SVNUtils:
             Args:
                 url: The branch to check out.
                 tolocation: Location on disk to check out to.
-                svn_username: Auto merging will use this svn username to perform the checkout.
-                svn_password: Auto merging will use this svn password to perform the checkout.
             Returns:
                 Nothing, the branch specified in url will be checked out to local disk.
         """
-        checkout_cmd = CO_TMPL % (url, TMPDIR, tolocation + '/', self.username, self.password)
-        M_SHU.runshellcmd(checkout_cmd) # branch to merge to does not exist in disk, check it out from svn.
+        # checkout_cmd = CO_TMPL % (url, TMPDIR, tolocation + '/', self.username, self.password)
+        self.svnClient.checkout(url, tolocation) # branch to merge to does not exist in disk, check it out from svn.
 
-    def merge_to_branch(self, revstart, revend=None, merge_from_url=None,
-                        merge_to_branch=None):
+
+    def merge_to_branch(self, revstart, revend=None, merge_from_url=None, workingCopy=None):
         """Given a branch url merge it into a local branch.
             
             Args:
@@ -237,19 +240,15 @@ class SVNUtils:
                 Nothing, The branch will be synced on disk.
         """
         mergeconf.LOGGER.debug('\nMerging...')
-        prev_rev = int(revstart) - 1 # In svn when merging single revision then merging from merge_rev - 1 to merge_rev
-        prev_rev_as_str = str(prev_rev)
+        mergeRevStart = pysvn.Revision(pysvn.opt_revision_kind.number, int(revstart) - 1) # In svn when merging single revision then merging from merge_rev - 1 to merge_rev
         if revend is None:
-            rev_as_str = str(revstart)
+            mergeRevEnd = mergeRevStart
         else:
-            rev_as_str = str(revend)
-        svn_merge_cmd = MERGE_TMPL % (prev_rev_as_str, rev_as_str, merge_from_url, TMPDIR, get_branch_dir
-                (merge_to_branch), self.username, self.password)
-        mergeconf.LOGGER.debug('merge cmd: : ' + svn_merge_cmd)
-        merge_result = M_SHU.runshellcmd(svn_merge_cmd)
-        mergeconf.LOGGER.debug('merge result:' + merge_result)
-        mergeconf.LOGGER.debug('merge cmd: : ' + svn_merge_cmd)
-        return rev_as_str
+            mergeRevEnd = pysvn.Revision(pysvn.opt_revision_kind.number, int(revend))
+        mergeconf.LOGGER.debug(str(revstart))
+        # svn_merge_cmd = MERGE_TMPL % (prev_rev_as_str, rev_as_str, merge_from_url, TMPDIR, get_branch_dir(merge_to_branch), self.username, self.password)
+        self.svnClient.merge(merge_from_url, mergeRevStart, merge_from_url, mergeRevEnd, workingCopy)
+        return 0
 
 def get_branch_dir(branch_name):
     """
@@ -284,22 +283,23 @@ def get_branch_col(svn_look_line, branches_map):
             if svn_look_line.find(branch) != -1:
                 return branches_map[branches_col]
 
-def get_branch_by_look(svn_look_line, BRANCHES_MAP):
+def get_branch_by_diff_summary(diffSumm, BRANCHES_MAP):
     """
         Example: for Branches/myapp/ver1/src/main/java/myfile.java will return Branches/myapp/ver1
 
         Args:
-            svn_look_line: Will deduce the relevant branches and project for this svn look line.
+            svn_log_line: Will deduce the relevant branches and project for this svn look line.
             BRANCHES_MAP: All projects with all their assigned branches.
         Returns:
             The branch path for the provided svn look line.
     """
-    mergeconf.LOGGER.debug('get_branch_by_look: svn_look_line: ' + svn_look_line + ', BRANCHES_MAP: ' + str(BRANCHES_MAP))
     for branches_col in BRANCHES_MAP:
         for branch in BRANCHES_MAP[branches_col]:
-            mergeconf.LOGGER.debug('get_branch_by_look: svn_look_line: ' + svn_look_line + ', branch: ' + branch)
-            if svn_look_line.find(branch) != -1:
-                return branch
+            for diffSummItem in diffSumm:
+                diffSummPath = diffSummItem.get('path')
+                mergeconf.LOGGER.debug('get_branch_by_diff_summary: diff summ path: ' + diffSummPath + ', branch: ' + branch)
+                if diffSummPath.find(branch) != -1:
+                    return branch
 
 def get_branch_url(name):
     """
